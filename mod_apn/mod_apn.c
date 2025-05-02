@@ -68,7 +68,7 @@ struct originate_register_data {
         char *user;
         char *x_call_id;
         switch_mutex_t *mutex;
-        uint32_t *timelimit;
+        int32_t *timelimit;
         switch_bool_t wait_any_register;
 };
 typedef struct originate_register_data originate_register_t;
@@ -713,7 +713,7 @@ static void originate_register_event_handler(switch_event_t *event)
         char *event_username = NULL, *event_realm = NULL, *event_call_id = NULL, *event_contact = NULL, *event_profile = NULL;
         char *destination = NULL;
         const char *domain_name = NULL, *dial_user = NULL, *update_reg = NULL;
-        uint32_t timelimit_sec = 0;
+        int32_t timelimit_sec = 0;
 
         switch_memory_pool_t *pool;
         switch_mutex_t *handles_mutex;
@@ -755,12 +755,15 @@ static void originate_register_event_handler(switch_event_t *event)
                 goto end;
         }
 
-		if (*originate_data->timelimit > 30) {
-			timelimit_sec =  30;
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "EMITRR APN: Invalid timelimit_sec before try originate (%d), resetting current_timelimit to default 30s for callId '%s'\n", *originate_data->timelimit, originate_data->x_call_id);
-		} else {
-        	        timelimit_sec = *originate_data->timelimit;
-		}
+        if (*originate_data->timelimit <= 0) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "EMITRR APN: Invalid timelimit_sec before try originate (%d), skipping originate for callId '%s'\n", *originate_data->timelimit, originate_data->x_call_id);
+                return;
+        } else if (*originate_data->timelimit > 30) {
+                timelimit_sec =  30;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "EMITRR APN: Invalid timelimit_sec before try originate (%d), resetting current_timelimit to default 30s for callId '%s'\n", *originate_data->timelimit, originate_data->x_call_id);
+        } else {
+                timelimit_sec = *originate_data->timelimit;
+        }
 
         destination = switch_mprintf("[registration_token=%s,originate_timeout=%u]sofia/%s/%s:_:[originate_timeout=%u,enable_send_apn=false,apn_wait_any_register=%s]apn_wait/%s@%s",
                                                                  event_call_id,
@@ -981,8 +984,8 @@ static switch_call_cause_t apn_wait_outgoing_channel(switch_core_session_t *sess
 			 switch_call_cause_t *cancel_cause)
 {
     switch_call_cause_t cause = SWITCH_CAUSE_NONE;
-    uint32_t timelimit_sec = 0;
-    uint32_t current_timelimit = 0;
+    int32_t timelimit_sec = 0;
+    int32_t current_timelimit = 0;
 	char *user = NULL, *domain = NULL, *dup_domain = NULL;
 	char *var_val = NULL;
 	switch_event_t *event = NULL;
@@ -1058,7 +1061,7 @@ static switch_call_cause_t apn_wait_outgoing_channel(switch_core_session_t *sess
       if ((var_val = switch_event_get_header(var_event, "originate_timeout"))) {
 			int tmp = (int)strtol(var_val, NULL, 10);
         if (tmp > 0) {
-          timelimit_sec = (uint32_t) tmp;
+          timelimit_sec = (int32_t) tmp;
         }
       }
     }
@@ -1124,12 +1127,19 @@ static switch_call_cause_t apn_wait_outgoing_channel(switch_core_session_t *sess
       }
     }
 
+    if ((int)(switch_epoch_time_now(NULL) - start) > timelimit_sec) {
+       // Timelimit expired
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "EMITRR. Timelimit expired for callId: %s Current epoch time: %ld, Start time: %ld, Timelimitsec: %d, diff: %d \n", x_call_id, switch_epoch_time_now(NULL), start, timelimit_sec, diff);
+      goto done;
+    }
+
     while (current_timelimit > 0) {
           diff = (int)(switch_epoch_time_now(NULL) - start);
 	  current_timelimit = timelimit_sec - diff;
-          if (current_timelimit > 30) {
+          if (current_timelimit > 30 || current_timelimit <= 0) {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "EMITRR. Invalid time left: %d for callId: %s Current epoch time: %ld, Start time: %ld, Timelimitsec: %d, diff: %d \n", current_timelimit, x_call_id, switch_epoch_time_now(NULL), start, timelimit_sec, diff);
-          }
+            break;
+        }
 
       if (wait_any_register != SWITCH_TRUE) {
         switch_mutex_lock(apn_response.mutex);
@@ -1169,11 +1179,11 @@ static switch_call_cause_t apn_wait_outgoing_channel(switch_core_session_t *sess
         }
 
         #if SWITCH_LESS_THAN(1, 8)
-           if (switch_ivr_originate(session, new_session, &cause, destination, current_timelimit > 30 ? 30 : current_timelimit, NULL,
+           if (switch_ivr_originate(session, new_session, &cause, destination, (current_timelimit > 30 || current_timelimit <= 0) ? 30 : current_timelimit, NULL,
                 cid_name_override, cid_num_override, outbound_profile, var_event, flags,
                 cancel_cause) == SWITCH_STATUS_SUCCESS) {
         #else
-          if (switch_ivr_originate(session, new_session, &cause, destination, current_timelimit > 30 ? 30 : current_timelimit, NULL,
+          if (switch_ivr_originate(session, new_session, &cause, destination, (current_timelimit > 30 || current_timelimit <= 0) ? 30 : current_timelimit, NULL,
               cid_name_override, cid_num_override, outbound_profile, var_event, flags,
               cancel_cause, NULL) == SWITCH_STATUS_SUCCESS) {
         #endif
